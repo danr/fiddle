@@ -6,6 +6,7 @@ using Type[Self]. One minor wrinkle is that you get a type error if not
 supplying arguments for all fields without default values.
 '''
 
+from __future__ import annotations
 from dataclasses import dataclass, replace, fields
 from typing import Type, Any
 from typing_extensions import Self
@@ -21,16 +22,25 @@ class ReplaceMixin:
             return replace(self, **kws)
         return replacer # type: ignore
 
+class PrivateReplaceMixin:
+    @property
+    def _replace(self) -> Type[Self]:
+        def replacer(*args: Any, **kws: Any) -> Self:
+            for field, arg in zip(fields(self), args):
+                kws[field.name] = arg
+            return replace(self, **kws)
+        return replacer # type: ignore
+
 @dataclass
 class A(ReplaceMixin):
     x: int = 0
     y: int = 0
 
-a = A(1, 2)
-print(a)
-print(a.replace(x=10))
-print(a.replace(100))
-print(a.replace(y=20))
+# a = A(1, 2)
+# print(a)
+# print(a.replace(x=10))
+# print(a.replace(100))
+# print(a.replace(y=20))
 
 '''output:
 A(x=1, y=2)
@@ -48,10 +58,16 @@ class B(ReplaceMixin):
     y: int
     z: int
 
-b = B(1, 2, 3)
-print(b)
-print(b.replace(y=20)) # Type error: Argument missing for parameter "x"
-                       # (however it still does the correct thing at runtime:)
+@dataclass
+class C(A):
+    cc: int = 9
+
+C().replace(cc=4, y=4) # types correctly with inheritance
+
+# b = B(1, 2, 3)
+# print(b)
+# print(b.replace(y=20)) # Type error: Argument missing for parameter "x"
+#                        # (however it still does the correct thing at runtime:)
 
 '''output:
 B(x=1, y=2)
@@ -68,10 +84,10 @@ def repl(con: Callable[P, R]) -> Callable[Concatenate[R, P], R]:
         return replace(v, **kws)
     return replacer # type: ignore
 
-ra = repl(A)
-rb = repl(B)
-print(ra(a, x=1000))
-print(rb(b, 99, y=98, z=97))
+# ra = repl(A)
+# rb = repl(B)
+# print(ra(a, x=1000))
+# print(rb(b, 99, y=98, z=97))
 
 from datetime import datetime
 from dataclasses import field
@@ -80,10 +96,28 @@ import sqlite3
 
 X = TypeVar('X')
 
-@dataclass
-class Select(Generic[P, R]):
-    where: Callable[P, list[R]]
-    # __iter__: Callable[[], list[R]]
+@dataclass(frozen=True)
+class SelectOptions(ReplaceMixin):
+    order: str = 'id'
+    limit: int | None = None
+    offset: int | None = None
+
+@dataclass(frozen=True)
+class Select(Generic[P, R], PrivateReplaceMixin):
+    _opts: SelectOptions = SelectOptions()
+    _where: Callable[Concatenate[SelectOptions, P], list[R]] = cast(Any, ...)
+
+    def where(self, *args: P.args, **kws: P.kwargs) -> list[R]:
+        return self._where(self._opts, *args, **kws)
+
+    def limit(self, bound: int | None = None, offset: int | None = None) -> Select[P, R]:
+        return self._replace(self._opts.replace(limit=bound, offset=offset))
+
+    def order(self, by: str) -> Select[P, R]:
+        return self._replace(self._opts.replace(order=by))
+
+    def __iter__(self):
+        yield from self.where() # type: ignore
 
 def coll(nonce: Any, *args: Any, **kws: Any):
     for field, arg in zip(fields(nonce), args):
@@ -96,41 +130,51 @@ import json
 class DB:
     con: sqlite3.Connection
     def get(self, t: Callable[P, R]) -> Select[P, R]:
-        def where(*args: P.args, **kws: P.kwargs) -> list[R]:
-            clauses: list[str] = ['1']
+        def where(opts: SelectOptions, *args: P.args, **kws: P.kwargs) -> list[R]:
+            clauses: list[str] = []
             for f, a in coll(t, *args, **kws):
                 clauses += [f'v ->> {f!r} = {json.dumps(a)}']
-            clause = ' and '.join(clauses)
-            stmt = f'select v from {t.__name__} where {clause}'
+            if clauses:
+                where_clause = 'where ' + ' and '.join(clauses)
+            else:
+                where_clause = ''
+            stmt = f'select v from {t.__name__} {where_clause} order by v ->> {opts.order!r}'
+            limit, offset = opts.limit, opts.offset
+            if limit is None:
+                limit = -1
+            if offset is None:
+                offset = 0
+            if limit != -1 or offset != 0:
+                stmt += f' limit {limit} offset {offset}'
             print(stmt)
             return [
                 t(**json.loads(v))
                 for v, in self.con.execute(stmt).fetchall()
             ]
-        return Select(where)
+        return Select(_where=where)
 
 from dataclasses import asdict
 
-@dataclass
-class Todo(ReplaceMixin):
-    msg: str = ''
-    done: bool = False
-    # deleted: None | datetime = None
-    # created: datetime = field(default_factory=lambda: datetime.now())
-    id: int = -1
+db: DB = ... # type: ignore
 
-    def save(self, db: DB) -> Self:
+from typing import Protocol
+import textwrap
+
+class DBMixin(ReplaceMixin):
+    id: int
+
+    def save(self) -> Self:
         tbl = self.__class__.__name__
-        db.con.executescript(f'''
+        db.con.executescript(textwrap.dedent(f'''
             create table if not exists {tbl} (
-                id integer as (v -> 'id') unique,
-                v text,
-                check (typeof(id) = 'integer'),
-                check (id >= 0),
-                check (json_valid(v))
+              id integer as (v ->> 'id') unique,
+              v text,
+              check (typeof(id) = 'integer'),
+              check (id >= 0),
+              check (json_valid(v))
             );
             create index if not exists {tbl}_id on {tbl} (id);
-        ''')
+        '''))
         exists = db.con.execute(f'''
             select 1 from {tbl} where id = ?
         ''', [self.id]).fetchall()
@@ -144,30 +188,87 @@ class Todo(ReplaceMixin):
             id, = db.con.execute(f'''
                 select ifnull(max(id) + 1, 0) from {tbl};
             ''').fetchone()
-            res = self.replace(id=id)
+            res = self.replace(id=id) # type: ignore
             db.con.execute(f'''
                 insert into {tbl} values (?)
             ''', [json.dumps(asdict(res))])
             db.con.commit()
             return res
 
+@dataclass
+class Todo(DBMixin):
+    msg: str = ''
+    done: bool = False
+    # deleted: None | datetime = None
+    # created: datetime = field(default_factory=lambda: datetime.now())
+    id: int = -1
+
+@dataclass
+class Person(DBMixin):
+    name: str = ''
+    parent_ids: list[int] = field(default_factory=list)
+    id: int = -1
+
+    @property
+    def parents(self):
+        return [
+            p
+            for pid in self.parent_ids
+            for p in db.get(Person).where(id=pid)
+        ]
+
 from pprint import pp
 
 with sqlite3.connect(':memory:') as con:
     db: DB = DB(con)
-    Todo('banana').save(db)
-    Todo('boop').save(db)
-    Todo('floop').save(db)
-    Todo('flapp', done=True).save(db)
-    h = Todo('happ').save(db)
-    pp(list(db.con.execute("select * from Todo")))
-    pp(db.get(Todo).where(done=True))
-    pp(db.get(Todo).where(msg='banana'))
-    pp(db.get(Todo).where(id=2))
-    pp(h)
-    h = h.replace(msg = 'happ 2', done=True)
-    pp(h.save(db))
-    pp(db.get(Todo).where(id=h.id))
-    pp(list(db.con.execute("select * from Todo")))
-    pp(db.get(Todo).where(done=True))
 
+    Todos = db.get(Todo)
+    Persons = db.get(Person)
+
+    Todo('banana').save()
+    Todo('flapp', done=True).save()
+    Todo('boop').save()
+    Todo('floop').save()
+    h = Todo('happ').save()
+    pp(list(db.con.execute("select * from Todo")))
+    pp(Todos.where(done=True))
+    pp(Todos.where(done=False))
+    pp(Todos.where(done=True, msg='flapp'))
+    pp(Todos.where(msg='banana'))
+    pp(Todos.where(id=2))
+    pp(h)
+    h = h.replace(msg='happ 2', done=True)
+    pp(h.save())
+    pp(list(db.con.execute("select * from Todo")))
+    pp(Todos.where())
+    pp(Todos.order('msg').where())
+
+    print('---')
+
+    dan = Person('Dan').save()
+    unni = Person('Unni').save()
+    iris = Person('Iris', parent_ids=[dan.id, unni.id]).save()
+
+    pp([dan, unni, iris])
+
+    pp([p for p in Persons])
+    pp(Persons.order('name').where())
+
+    ps: list[Person] = iris.parents
+    pp(ps)
+
+    pp(list(db.con.execute("""
+        select
+            a.v, b.v
+        from
+            Person a,
+            json_each(a.v -> 'parent_ids') p,
+            Person b
+        where
+            b.id = p.value
+    """)))
+
+    if 0:
+        from pathlib import Path
+        Path("lol.db").unlink(missing_ok=True)
+        db.con.execute('vacuum into "lol.db"')
