@@ -7,7 +7,7 @@ supplying arguments for all fields without default values.
 '''
 
 from __future__ import annotations
-from dataclasses import dataclass, replace, fields
+from dataclasses import dataclass, replace, fields, MISSING
 from typing import Type, Any
 from typing_extensions import Self
 from typing import *
@@ -110,6 +110,9 @@ class Select(Generic[P, R], PrivateReplaceMixin):
     def where(self, *args: P.args, **kws: P.kwargs) -> list[R]:
         return self._where(self._opts, *args, **kws)
 
+    def get(self, *args: P.args, **kws: P.kwargs) -> R:
+        return self._where(self._opts, *args, **kws)[0]
+
     def limit(self, bound: int | None = None, offset: int | None = None) -> Select[P, R]:
         return self._replace(self._opts.replace(limit=bound, offset=offset))
 
@@ -126,14 +129,20 @@ def coll(nonce: Any, *args: Any, **kws: Any):
 
 import json
 
+def sqlquote(s: str) -> str:
+    c = "'"
+    return c + s.replace(c, c+c) + c
+
 @dataclass
 class DB:
     con: sqlite3.Connection
+    to_json = json.dumps
+    from_json = json.loads
     def get(self, t: Callable[P, R]) -> Select[P, R]:
         def where(opts: SelectOptions, *args: P.args, **kws: P.kwargs) -> list[R]:
             clauses: list[str] = []
             for f, a in coll(t, *args, **kws):
-                clauses += [f'v ->> {f!r} = {json.dumps(a)}']
+                clauses += [f"v -> {sqlquote(f)} = {sqlquote(json.dumps(a))} -> '$'"]
             if clauses:
                 where_clause = 'where ' + ' and '.join(clauses)
             else:
@@ -163,6 +172,13 @@ import textwrap
 class DBMixin(ReplaceMixin):
     id: int
 
+    def delete(self) -> int:
+        tbl = self.__class__.__name__
+        c = db.con.execute(f'''
+            delete from {tbl} where id = ?
+        ''', [self.id])
+        return c.rowcount
+
     def save(self) -> Self:
         tbl = self.__class__.__name__
         db.con.executescript(textwrap.dedent(f'''
@@ -180,7 +196,7 @@ class DBMixin(ReplaceMixin):
         ''', [self.id]).fetchall()
         if exists:
             db.con.execute(f'''
-                update {tbl} set v = ? where id = ?
+                update {tbl} set v = ? -> '$' where id = ?
             ''', [json.dumps(asdict(self)), self.id])
             db.con.commit()
             return self
@@ -190,10 +206,17 @@ class DBMixin(ReplaceMixin):
             ''').fetchone()
             res = self.replace(id=id) # type: ignore
             db.con.execute(f'''
-                insert into {tbl} values (?)
+                insert into {tbl} values (? -> '$')
             ''', [json.dumps(asdict(res))])
             db.con.commit()
             return res
+
+    @property
+    def update(self) -> Type[Self]:
+        return lambda *args, **kws: self.replace(*args, **kws).save() # type: ignore
+
+    def reload(self) -> Self:  # reload ?
+        return db.get(self.__class__).where(id=self.id)[0]
 
 @dataclass
 class Todo(DBMixin):
@@ -246,6 +269,34 @@ with sqlite3.connect(':memory:') as con:
     print('---')
 
     dan = Person('Dan').save()
+
+    db.con.executescript('''
+        create table PersonLog (
+          t timestamp default (strftime('%Y-%m-%d %H:%M:%f', 'now', 'localtime')),
+          action text,
+          id integer,
+          new json
+        );
+        create trigger
+            Person_insert after insert on Person
+        begin
+            insert into PersonLog(id, new, action) values (NEW.id, NEW.v, "insert");
+        end;
+        create trigger
+            Person_update after update on Person
+        begin
+            insert into PersonLog(id, new, action) values (OLD.id, NEW.v, "update");
+        end;
+        create trigger
+            Person_delete after delete on Person
+        begin
+            insert into PersonLog(id, new, action) values (OLD.id, NULL, "delete");
+        end;
+    ''')
+
+    dan.delete()
+    dan.save()
+
     unni = Person('Unni').save()
     iris = Person('Iris', parent_ids=[dan.id, unni.id]).save()
 
@@ -253,6 +304,9 @@ with sqlite3.connect(':memory:') as con:
 
     pp([p for p in Persons])
     pp(Persons.order('name').where())
+
+    pp(Persons.where(parent_ids=[]))
+    pp(Persons.where(parent_ids=[0, 1]))
 
     ps: list[Person] = iris.parents
     pp(ps)
@@ -268,7 +322,38 @@ with sqlite3.connect(':memory:') as con:
             b.id = p.value
     """)))
 
+    Persons.get(id=1).update(name='Unni Björklund')
+    u = Persons.get(id=0)
+    u.delete()
+    u.delete()
+    print(Persons.get(id=1).name)
+
     if 0:
+        def lens(value: str, update: Callable[[str], None], js_fragment: str='event.value'):
+            return {
+                'value': value,
+                'onchange': call(update, js(js_fragment))
+            }
+
+        input(
+            lens(dan.name, lambda s: dan.update(name=s))
+        )
+
+    if 1:
         from pathlib import Path
+        db.con.commit()
         Path("lol.db").unlink(missing_ok=True)
         db.con.execute('vacuum into "lol.db"')
+        # db.con.close()
+        from subprocess import check_output
+        print(
+            check_output(
+                [
+                    'sqlite3',
+                    'lol.db',
+                    '.mode box',
+                    'select *, new ->> "name" from PersonLog'
+                ],
+                encoding='utf8'
+            )
+        )
