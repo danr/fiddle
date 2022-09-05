@@ -1,4 +1,3 @@
-
 '''
 I figured out a way to make a mixin for a correctly typed replace method on
 data classes. It reuses the type of the constructor of the class, accessed
@@ -7,11 +6,12 @@ supplying arguments for all fields without default values.
 '''
 
 from __future__ import annotations
-from dataclasses import dataclass, replace, fields, MISSING
+from dataclasses import dataclass, replace, fields
 from typing import Type, Any
 from typing_extensions import Self
 from typing import *
 from typing_extensions import *
+import json
 
 class ReplaceMixin:
     @property
@@ -126,8 +126,6 @@ def coll(cls: Any, *args: Any, **kws: Any):
     for field, arg in zip(fields(cls), args):
         kws[field.name] = arg
     return kws.items()
-
-import json
 
 def sqlquote(s: str) -> str:
     c = "'"
