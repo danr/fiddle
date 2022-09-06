@@ -1,62 +1,70 @@
-
-import pickle
-import marshal
+from __future__ import annotations
+from dataclasses import dataclass
 from types import FunctionType, CellType, MethodType
 from typing import Any, Callable
+import marshal
 import sys
 
-def lamdumps(f: Callable[..., Any]):
-    co = f.__code__
-    return pickle.dumps((
-        marshal.dumps(f.__code__),
-        f.__module__,
-        f.__name__,
-        f.__defaults__,
-        tuple(
-            c.cell_contents
-            for c in f.__closure__ or ()
-        ),
-        f.__kwdefaults__,
-        f.__qualname__,
-        (hasattr(f, '__self__'), getattr(f, '__self__', None)),
-    ))
+@dataclass(frozen=True, slots=True)
+class Box:
+    value: Any
 
-def cell(co: Any) -> CellType:
-    c = CellType()
-    c.cell_contents = co
-    return c
+@dataclass(frozen=True, slots=True)
+class Function:
+    marshalled_code: bytes
+    module: str
+    name: str
+    defaults: Any
+    closure: tuple[Box | Function, ...]
+    kwdefaults: dict[str, Any]
+    qualname: str
+    has_self: bool
+    bound_self: Any
 
-def lamloads(b: bytes):
-    mco, m, n, d, clo, k, qn, (has_self, slf) = pickle.loads(b)
-    co = marshal.loads(mco)
-    g = sys.modules[m].__dict__
-    f = FunctionType(co, g, n, d, tuple(map(cell, clo)))
-    f.__kwdefaults__ = k
-    f.__qualname__ = qn
-    if has_self:
-        return MethodType(f, slf)
-    return f
+    @staticmethod
+    def freeze(f: Callable[..., Any]):
+        closure: list[Box | Function] = []
+        for cell in f.__closure__ or ():
+            c = cell.cell_contents
+            if hasattr(c, '__code__') and hasattr(c, '__closure__'):
+                closure += [Function.freeze(c)]
+            else:
+                closure += [Box(c)]
+        return Function(
+            marshal.dumps(f.__code__),
+            f.__module__,
+            f.__name__,
+            f.__defaults__,
+            tuple(closure),
+            f.__kwdefaults__,
+            f.__qualname__,
+            hasattr(f, '__self__'),
+            getattr(f, '__self__', None),
+        )
 
-if 0:
-    co = f.__code__
-    for k in dir(co):
-        if k.startswith('co_'):
-            print(k, getattr(co, k))
-    print(*co.co_lines())
+    def thaw(self) -> Callable[..., Any]:
+        code = marshal.loads(self.marshalled_code)
+        g = sys.modules[self.module].__dict__
+        closure: list[Any] = [
+            Function._make_cell(c.thaw() if isinstance(c, Function) else c.value)
+            for c in self.closure
+        ]
+        f = FunctionType(code, g, self.name, self.defaults, tuple(closure))
+        f.__kwdefaults__ = self.kwdefaults
+        f.__qualname__ = self.qualname
+        if self.has_self:
+            return MethodType(f, self.bound_self)
+        return f
 
-x = 1
-def h(us: tuple[int, int], z: int):
-    return lambda a, b=4, *, c=9: 1 + x + us[0] + z
+    @staticmethod
+    def _make_cell(co: Any) -> CellType:
+        c = CellType()
+        c.cell_contents = co
+        return c
 
 import other
 
-def f1(i: int):
-    return i+2
-f2 = h((4, 3), 5)
-f3 = lambda y: x + y
-f4 = other.f
-
-from dataclasses import dataclass
+x = 1
 
 @dataclass
 class T:
@@ -64,26 +72,62 @@ class T:
     def f(self, i: int):
         return i + self.j
 
-t = T(7)
+@dataclass
+class NotF:
+    def __call__(self, i: int):
+        return i + 1
 
-fs: list[Callable[[int], int]] = [f1, f2, f3, f4, t.f, T().f]
+def main():
+    global x
 
-for f in fs:
-    b = lamdumps(f)
-    F = lamloads(b)
-    other.incr()
-    x += 1
-    print(F.__module__, f.__module__)
-    print(F.__name__, f.__name__)
-    print(F.__qualname__, f.__qualname__)
-    print(F(1), f(1))
-    print('---')
+    def h(us: tuple[int, int], z: int):
+        def g(j: int):
+            return j + 1
+        return lambda a, b=4, *, c=9: 1 + x + us[0] + z + g(a)
 
-'''
-@expose
-def call_impl(f: bytes, args: ...)
-    return f(lamloads(f), args)
+    def f1(i: int):
+        def g(j: int):
+            return j + i
+        def h(j: int):
+            return g(j) + i
+        return g(i) + h(i)
+    f2 = h((4, 3), 5)
+    f3 = lambda y: x + y
+    f4 = other.f
 
-def call(f: Callable, args: ...)
-    return call_impl(lamdumps(f), args)
-'''
+    t = T(7)
+
+    def make_not_f():
+        f=NotF()
+        g = T().f
+        def not_f(i: int) -> int:
+            return f(i) + g(i)
+        return not_f
+
+    fs: list[Callable[[int], int]] = [f1, f2, f3, f4, t.f, T().f, make_not_f()]
+
+    for f in fs:
+        b = Function.freeze(f)
+        print(b.closure)
+        import pickle
+        print(len(pickle.dumps(b)))
+        F = b.thaw()
+        other.incr()
+        x += 1
+        print(F.__module__, f.__module__)
+        print(F.__name__, f.__name__)
+        print(F.__qualname__, f.__qualname__)
+        print(F(1), f(1))
+        print('---')
+
+    '''
+    @expose
+    def call_impl(f: bytes, args: ...)
+        return f(lamloads(f), args)
+
+    def call(f: Callable, args: ...)
+        return call_impl(lamdumps(f), args)
+    '''
+
+if __name__ == '__main__':
+    main()
