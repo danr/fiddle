@@ -35,9 +35,9 @@ def clear(clear_opt: int):
     # 3J - clear scrollback buffer
     # H  - set cursor position to the default
     if clear_opt == 1:
-        print('\033[2J\033[H', flush=True)
+        print('\033[2J\033[H', end='', flush=True)
     if clear_opt >= 2:
-        print('\033[2J\033[3J\033[H', flush=True)
+        print('\033[2J\033[3J\033[H', end='', flush=True)
 
 def main_inner(preload: str, argv: list[str], is_module: bool, glob_pattern: str, clear_opt: int=0):
     for name in preload.split(','):
