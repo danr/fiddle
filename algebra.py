@@ -7,6 +7,7 @@ class B(Protocol, Generic[A]):
     def add(self, lhs: A, rhs: A) -> A: ...
 
 def q(m: B[A]) -> A:
+    memmove()
     return m.add(m.lit(1), m.lit(2))
 
 class Eval(B[int]):
