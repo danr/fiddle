@@ -15,6 +15,7 @@ import argparse
 from inotify_simple import INotify, masks, flags
 
 def run(argv: list[str], is_module: bool, clear_opt: int):
+    sys.dont_write_bytecode = True
     sys.argv[1:] = argv[1:]
     clear(clear_opt)
     if is_module:
@@ -91,10 +92,6 @@ def main():
     parser = argparse.ArgumentParser(
         description='''
             Runs a program and reruns it on updating files matching a glob (default **/*.py).
-        ''',
-        epilog='''
-            Recommended: run with PYTHONDONTWRITEBYTECODE=x.
-            This prevents a race condition where outdated .pyc files are run.
         ''',
         add_help=False,
     )
