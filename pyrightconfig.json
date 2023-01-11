@@ -11,5 +11,6 @@
     "reportUnusedFunction": "none",
     "reportPrivateUsage": "warning",
     "reportConstantRedefinition": "none",
+    "reportUnusedExpression": "none",
     "reportUnknownLambdaType": "warning"
 }
